@@ -578,14 +578,26 @@ html {
   font-weight: 600;
   white-space: nowrap;
 }
+/* Mobile: keep the "Refresh" label; make room by hiding the avatar and letting the brand name shrink. */
 @media (max-width: 600px) {
   .icon-button.with-label {
-    width: 38px;
-    padding: 0;
-    justify-content: center;
+    padding: 0 12px;
+    gap: 6px;
   }
-  .icon-button.with-label span {
+  .topbar-right .avatar {
     display: none;
+  }
+  .topbar-left {
+    flex: 1;
+    min-width: 0;
+  }
+  .topbar-brand {
+    min-width: 0;
+  }
+  .topbar-brand strong {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 .icon-button:hover:not(:disabled) {
