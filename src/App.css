@@ -507,6 +507,27 @@ html {
   gap: 8px;
   color: var(--accent);
 }
+.topbar-logo {
+  display: grid;
+  place-items: center;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 34px;
+  padding: 2px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.topbar-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+.topbar-logo.logo-fallback .logo-fallback-icon {
+  display: block;
+}
 .topbar-brand strong {
   color: var(--text);
   font-weight: 700;

@@ -1323,7 +1323,7 @@ export default function App() {
           <div className="brand-logo">
             <img
               src="/cmp_logo.png"
-              alt="FZ Evergreen Agro Tech India logo."
+              alt="FZ Evergreen Agro Tech India logo"
               onError={(e) => {
                 e.currentTarget.style.display = "none";
                 e.currentTarget.parentElement.classList.add("logo-fallback");
@@ -1410,7 +1410,19 @@ export default function App() {
         <header className="topbar">
           <div className="topbar-left">
             <div className="topbar-brand">
-              <Leaf size={18} />
+              <span className="topbar-logo">
+                <img
+                  src="/cmp_logo.png"
+                  alt="FZ Evergreen Agro Tech India logo"
+                  onError={(e) => {
+                    e.currentTarget.style.display = "none";
+                    e.currentTarget.parentElement.classList.add(
+                      "logo-fallback",
+                    );
+                  }}
+                />
+                <Leaf className="logo-fallback-icon" size={18} />
+              </span>
               <strong>FZ Evergreen</strong>
             </div>
             <div className="breadcrumb">
