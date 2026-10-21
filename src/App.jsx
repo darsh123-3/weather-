@@ -1322,7 +1322,7 @@ export default function App() {
         >
           <div className="brand-logo">
             <img
-              src="/cmp_logo.jpeg"
+              src="/cmp_logo.png"
               alt="FZ Evergreen Agro Tech India logo"
               onError={(e) => {
                 e.currentTarget.style.display = "none";
