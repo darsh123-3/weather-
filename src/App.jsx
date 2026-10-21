@@ -1323,7 +1323,7 @@ export default function App() {
           <div className="brand-logo">
             <img
               src="/cmp_logo.png"
-              alt="FZ Evergreen Agro Tech India logo"
+              alt="FZ Evergreen Agro Tech India logo."
               onError={(e) => {
                 e.currentTarget.style.display = "none";
                 e.currentTarget.parentElement.classList.add("logo-fallback");
