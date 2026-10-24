@@ -4,6 +4,7 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -46,7 +47,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { getGateways, getSensorData } from "./api";
+import { getGateways, getAllReadings, readingKey } from "./api";
 import "./App.css";
 
 const TZ = "Asia/Kolkata";
@@ -164,15 +165,18 @@ const TYPES = {
     keys: ["voltage", "battery", "电压"],
   },
 };
-const pad = (n) => String(n).padStart(2, "0");
 const IST_OFFSET_MINUTES = 330;
-const CHINA_OFFSET_MINUTES = 480;
-const CHART_MAX_POINTS = 480;
+// Above this many points the chart keeps each bucket's min and max (peaks stay visible).
+// The readings table and the CSV/Excel export always contain every reading.
+const CHART_MAX_POINTS = 1500;
 const TABLE_PAGE = 100;
 // Machine status: ONLINE if the API returns any reading in this recent window, else OFFLINE.
-// Station 2208 reports every ~126 min, so 6 h tolerates up to two missed reports.
 const STATUS_WINDOW_HOURS = 6;
-const STATUS_POLL_MS = 5 * 60000; // re-check every 5 minutes
+const STATUS_POLL_MS = 30000; // re-check every 30 seconds
+// Live mode (range ends "now"): fetch new readings every 30 seconds.
+const LIVE_POLL_MS = 30000;
+const LIVE_OVERLAP_MS = 15 * 60000; // re-read the last 15 min to catch late uploads
+const LIVE_TOLERANCE_MS = 3 * 60000; // an End time this close to now counts as "now"
 
 /* Formatters are created ONCE. Calling toLocaleString(..., options) builds a new
    Intl formatter on every call, which was a major source of lag with many rows. */
@@ -234,6 +238,7 @@ const initialRange = () => {
   return {
     startDate: localInput(new Date(end.getTime() - 86400000)),
     endDate: localInput(end),
+    live: true,
   };
 };
 
@@ -268,13 +273,6 @@ function displayTime(value) {
   return d ? TIME_FMT.format(d) : "—";
 }
 
-/* The picker is IST; the API expects timezone-free China wall-time parameters. */
-function indiaInputToChina(value) {
-  const istDate = parseISTInput(value);
-  if (!istDate) return "";
-  const china = new Date(istDate.getTime() + CHINA_OFFSET_MINUTES * 60000);
-  return `${china.getUTCFullYear()}-${pad(china.getUTCMonth() + 1)}-${pad(china.getUTCDate())} ${pad(china.getUTCHours())}:${pad(china.getUTCMinutes())}:00`;
-}
 function num(value) {
   if (value === null || value === undefined || value === "") return null;
   const s = String(value).trim();
@@ -370,7 +368,7 @@ function normalizeSensorName(rawName, index, channelNo, oriName) {
 
 function normalize(records) {
   return (Array.isArray(records) ? records : [])
-    .map((r, i) => {
+    .map((r) => {
       const bySensor = new Map();
       (Array.isArray(r?.data) ? r.data : []).forEach((s, j) => {
         const identity = normalizeSensorName(
@@ -395,7 +393,7 @@ function normalize(records) {
       const date = recordDate(r);
       // ts is parsed once here so sorting/filtering never re-parses dates.
       return {
-        id: `${date}-${r?.no || ""}-${i}`,
+        id: readingKey(r),
         date,
         ts: parseApiDate(date)?.getTime() || 0,
         no: r?.no || "",
@@ -403,6 +401,14 @@ function normalize(records) {
       };
     })
     .sort((a, b) => a.ts - b.ts);
+}
+
+/* Adds newly fetched readings to the list (same station + same time = same reading). */
+function mergeRecords(existing, incoming) {
+  if (!incoming.length) return existing;
+  const map = new Map(existing.map((r) => [r.id, r]));
+  incoming.forEach((r) => map.set(r.id, r));
+  return [...map.values()].sort((a, b) => a.ts - b.ts);
 }
 
 function sensorType(name) {
@@ -1026,12 +1032,11 @@ function useMachineStatus(deviceNo, refreshKey) {
     setStatus({ state: "checking", lastSeen: null });
     async function check() {
       try {
-        const end = new Date();
-        const start = new Date(end.getTime() - STATUS_WINDOW_HOURS * 3600000);
-        const data = await getSensorData(
+        const end = Date.now();
+        const data = await getAllReadings(
           deviceNo,
-          indiaInputToChina(localInput(start)),
-          indiaInputToChina(localInput(end)),
+          end - STATUS_WINDOW_HOURS * 3600000,
+          end,
         );
         if (cancelled) return;
         const recs = normalize(data); // oldest → newest
@@ -1082,13 +1087,17 @@ export default function App() {
   const [selectedSensor, setSelectedSensor] = useState("");
   const [loadingGateways, setLoadingGateways] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [connection, setConnection] = useState("unknown");
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
   const [refresh, setRefresh] = useState(0);
   const [range, setRange] = useState(initialRange);
   const [startDate, setStartDate] = useState(range.startDate);
   const [endDate, setEndDate] = useState(range.endDate);
+  const [progress, setProgress] = useState(null);
+  // Instant up to which the loaded readings are complete (live updates continue from here).
+  const coveredUntil = useRef(0);
+  // True while the user is editing the End field, so live mode won't overwrite it.
+  const endEdited = useRef(false);
 
   const gateway = useMemo(
     () => gateways.find((g) => String(g.no) === String(selectedNo)),
@@ -1109,7 +1118,6 @@ export default function App() {
       );
       if (!list.length) setError("No gateways were returned by the API.");
     } catch (e) {
-      setConnection("offline");
       setError(e.message || "Unable to load gateways.");
     } finally {
       setLoadingGateways(false);
@@ -1126,34 +1134,79 @@ export default function App() {
       return undefined;
     }
     let cancelled = false;
+    const controller = new AbortController();
     async function load() {
       setLoading(true);
       setError("");
-      setConnection("checking");
+      setProgress(null);
       try {
-        const data = await getSensorData(
-          selectedNo,
-          indiaInputToChina(range.startDate),
-          indiaInputToChina(range.endDate),
-        );
+        const startMs = parseISTInput(range.startDate).getTime();
+        // Live range: read right up to this moment (also when Refresh is pressed).
+        const endMs = range.live
+          ? Date.now()
+          : parseISTInput(range.endDate).getTime();
+        const data = await getAllReadings(selectedNo, startMs, endMs, {
+          signal: controller.signal,
+          onProgress: (requests, found) => {
+            if (!cancelled) setProgress({ requests, found });
+          },
+        });
         if (cancelled) return;
+        coveredUntil.current = endMs;
         setRecords(normalize(data));
         setLastUpdated(new Date());
-        setConnection("online");
       } catch (e) {
         if (cancelled) return;
         setRecords([]);
-        setConnection("offline");
         setError(e.message || "Unable to retrieve station readings.");
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setProgress(null);
+        }
       }
     }
     load();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [selectedNo, range, refresh]);
+
+  /* Live mode: every 30 s fetch what arrived since the last fetch and add it to the UI. */
+  useEffect(() => {
+    if (!range.live || !selectedNo || loading) return undefined;
+    let stopped = false;
+    let running = false;
+    const controller = new AbortController();
+    async function poll() {
+      if (running) return;
+      running = true;
+      try {
+        const now = Date.now();
+        const startMs = parseISTInput(range.startDate).getTime();
+        const from = Math.max(startMs, coveredUntil.current - LIVE_OVERLAP_MS);
+        const data = await getAllReadings(selectedNo, from, now, {
+          signal: controller.signal,
+        });
+        if (stopped) return;
+        coveredUntil.current = now;
+        setRecords((prev) => mergeRecords(prev, normalize(data)));
+        setLastUpdated(new Date());
+        if (!endEdited.current) setEndDate(localInput(new Date()));
+      } catch (e) {
+        if (!stopped) console.warn("Live update failed, retrying in 30 s:", e.message);
+      } finally {
+        running = false;
+      }
+    }
+    const timer = window.setInterval(poll, LIVE_POLL_MS);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      controller.abort();
+    };
+  }, [range, selectedNo, loading]);
 
   /* One pass over the records builds everything the cards and chart need. */
   const { sensors, seriesByKey, latestByKey, sparkByKey } = useMemo(() => {
@@ -1251,7 +1304,7 @@ export default function App() {
       e = parseISTInput(range.endDate);
     return s && e ? Math.max(0, Math.round((e - s) / 3600000)) : null;
   }, [range]);
-  const maxInput = useMemo(() => localInput(new Date()), [lastUpdated]);
+  const maxInput = localInput(new Date());
 
   const machine = useMachineStatus(selectedNo, refresh);
   const machineState = machine.state;
@@ -1298,10 +1351,13 @@ export default function App() {
       return setError("Please enter valid start and end date/time values.");
     if (startInstant > endInstant)
       return setError("Start date/time must be before end date/time.");
-    if (endInstant > new Date())
+    if (endInstant.getTime() > Date.now() + 60000)
       return setError("End date/time cannot be in the future (IST).");
     setError("");
-    setRange({ startDate, endDate });
+    endEdited.current = false;
+    // End time of (about) now = keep following new readings live.
+    const live = endInstant.getTime() >= Date.now() - LIVE_TOLERANCE_MS;
+    setRange({ startDate, endDate, live });
   }
 
   return (
@@ -1561,7 +1617,6 @@ export default function App() {
                     value={selectedNo}
                     onChange={(e) => {
                       setSelectedNo(e.target.value);
-                      setConnection("checking");
                     }}
                     disabled={loadingGateways || !gateways.length}
                   >
@@ -1751,7 +1806,10 @@ export default function App() {
                       value={endDate}
                       min={startDate || undefined}
                       max={maxInput}
-                      onChange={(e) => setEndDate(e.target.value)}
+                      onChange={(e) => {
+                        endEdited.current = true;
+                        setEndDate(e.target.value);
+                      }}
                       disabled={loading}
                     />
                   </label>
@@ -1771,7 +1829,9 @@ export default function App() {
               </div>
               <div className="range-note">
                 Showing {displayDate(parseISTInput(range.startDate))} →{" "}
-                {displayDate(parseISTInput(range.endDate))}
+                {range.live
+                  ? "now · live, updates every 30 s"
+                  : displayDate(parseISTInput(range.endDate))}
               </div>
 
               <div className="tabs" role="tablist">
@@ -1896,6 +1956,7 @@ export default function App() {
                     {records.length
                       ? "Updating readings…"
                       : "Fetching readings…"}
+                    {progress && ` · ${progress.found} found so far`}
                   </div>
                 )}
                 {switching && !loading && (
